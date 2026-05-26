@@ -1,0 +1,119 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  RDS PostgreSQL for AI Mock Interview Platform (workforme.space)
+
+Parameters:
+  VpcStackName:
+    Type: String
+    Default: interviewai-vpc
+  DBName:
+    Type: String
+    Default: interview_platform
+  DBUsername:
+    Type: String
+    Default: interviewai_admin
+    NoEcho: true
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    Description: Must be at least 16 characters
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    AllowedValues:
+      - db.t3.micro
+      - db.t3.small
+      - db.t3.medium
+      - db.r5.large
+
+Resources:
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnets for InterviewAI RDS
+      SubnetIds:
+        - Fn::ImportValue: !Sub ${VpcStackName}-PrivateSubnet1
+        - Fn::ImportValue: !Sub ${VpcStackName}-PrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: interviewai-db-subnet-group
+
+  # Parameter Group (tuned for AI workloads)
+  DBParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: InterviewAI PostgreSQL 16 params
+      Family: postgres16
+      Parameters:
+        shared_buffers: "256000"          # 256MB
+        effective_cache_size: "768000"    # 768MB
+        maintenance_work_mem: "65536"     # 64MB
+        checkpoint_completion_target: "0.9"
+        wal_buffers: "2048"
+        default_statistics_target: "100"
+        random_page_cost: "1.1"
+        effective_io_concurrency: "200"
+        work_mem: "4096"
+        min_wal_size: "1024"
+        max_wal_size: "4096"
+        max_connections: "200"
+        log_min_duration_statement: "1000"  # Log queries > 1s
+        log_checkpoints: "on"
+        log_connections: "on"
+        log_disconnections: "on"
+        log_lock_waits: "on"
+
+  # RDS Instance
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: interviewai-postgres
+      DBName: !Ref DBName
+      Engine: postgres
+      EngineVersion: "16.3"
+      DBInstanceClass: !Ref DBInstanceClass
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      AllocatedStorage: "20"
+      MaxAllocatedStorage: 100          # Auto-scaling up to 100GB
+      StorageType: gp3
+      StorageEncrypted: true
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - Fn::ImportValue: !Sub ${VpcStackName}-RDSSG
+      DBParameterGroupName: !Ref DBParameterGroup
+      BackupRetentionPeriod: 7          # 7 day backups
+      PreferredBackupWindow: "03:00-04:00"
+      PreferredMaintenanceWindow: "mon:04:00-mon:05:00"
+      MultiAZ: false                    # Set true for production HA
+      PubliclyAccessible: false
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 7
+      EnableCloudwatchLogsExports:
+        - postgresql
+        - upgrade
+      DeletionProtection: true
+      CopyTagsToSnapshot: true
+      Tags:
+        - Key: Name
+          Value: interviewai-postgres
+        - Key: Environment
+          Value: production
+
+Outputs:
+  DBEndpoint:
+    Value: !GetAtt DBInstance.Endpoint.Address
+    Export:
+      Name: !Sub ${AWS::StackName}-DBEndpoint
+
+  DBPort:
+    Value: !GetAtt DBInstance.Endpoint.Port
+    Export:
+      Name: !Sub ${AWS::StackName}-DBPort
+
+  DBName:
+    Value: !Ref DBName
+    Export:
+      Name: !Sub ${AWS::StackName}-DBName

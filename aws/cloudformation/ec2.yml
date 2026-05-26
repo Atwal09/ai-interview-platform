@@ -1,0 +1,224 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  EC2 Instance + ALB for Backend API of AI Mock Interview Platform
+  Domain: api.workforme.space
+
+Parameters:
+  VpcStackName:
+    Type: String
+    Default: interviewai-vpc
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.micro, t3.small, t3.medium, t3.large]
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair for SSH access
+  ACMCertificateArn:
+    Type: String
+    Description: ACM Certificate for HTTPS
+
+Resources:
+  # ---- IAM Role for EC2 ----
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: interviewai-ec2-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore  # SSM Session Manager
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+      Policies:
+        - PolicyName: InterviewAIEC2Policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub arn:aws:s3:::workforme.space-uploads/*
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                Resource: arn:aws:ssm:*:*:parameter/interviewai/*
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:log-group:/interviewai/*
+              - Effect: Allow
+                Action:
+                  - codedeploy:*
+                Resource: '*'
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2Role
+
+  # ---- EC2 Launch Template ----
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: interviewai-backend-lt
+      LaunchTemplateData:
+        ImageId: ami-0c02fb55956c7d316  # Amazon Linux 2023 (us-east-1) - update for region
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref KeyPairName
+        IamInstanceProfile:
+          Arn: !GetAtt EC2InstanceProfile.Arn
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub ${VpcStackName}-EC2SG
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 30
+              VolumeType: gp3
+              Encrypted: true
+              DeleteOnTermination: true
+        UserData:
+          Fn::Base64: |
+            #!/bin/bash
+            set -e
+            
+            # Update system
+            dnf update -y
+            
+            # Install Docker
+            dnf install -y docker
+            systemctl enable docker
+            systemctl start docker
+            usermod -aG docker ec2-user
+            
+            # Install CodeDeploy Agent
+            dnf install -y ruby wget
+            cd /home/ec2-user
+            wget https://aws-codedeploy-us-east-1.s3.us-east-1.amazonaws.com/latest/install
+            chmod +x ./install
+            ./install auto
+            systemctl enable codedeploy-agent
+            systemctl start codedeploy-agent
+            
+            # Install CloudWatch agent
+            dnf install -y amazon-cloudwatch-agent
+            
+            # Create app directory
+            mkdir -p /home/ec2-user/app
+            chown -R ec2-user:ec2-user /home/ec2-user/app
+            
+            # Create CloudWatch log group
+            aws logs create-log-group --log-group-name /interviewai/backend --region us-east-1 || true
+            
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: interviewai-backend
+              - Key: Project
+                Value: ai-interview-platform
+
+  # ---- EC2 Instance ----
+  BackendEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      SubnetId:
+        Fn::ImportValue: !Sub ${VpcStackName}-PrivateSubnet1
+      Tags:
+        - Key: Name
+          Value: interviewai-backend
+
+  # ---- Application Load Balancer ----
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: interviewai-alb
+      Type: application
+      Scheme: internet-facing
+      SecurityGroups:
+        - Fn::ImportValue: !Sub ${VpcStackName}-ALBSG
+      Subnets:
+        - Fn::ImportValue: !Sub ${VpcStackName}-PublicSubnet1
+        - Fn::ImportValue: !Sub ${VpcStackName}-PublicSubnet2
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "300"
+        - Key: access_logs.s3.enabled
+          Value: "false"
+
+  # ALB Target Group
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: interviewai-api-tg
+      VpcId:
+        Fn::ImportValue: !Sub ${VpcStackName}-VpcId
+      Protocol: HTTP
+      Port: 5000
+      TargetType: instance
+      Targets:
+        - Id: !Ref BackendEC2Instance
+          Port: 5000
+      HealthCheckPath: /api/health
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  # ALB HTTPS Listener
+  ALBListenerHTTPS:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Protocol: HTTPS
+      Port: 443
+      Certificates:
+        - CertificateArn: !Ref ACMCertificateArn
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+
+  # ALB HTTP Listener (redirect to HTTPS)
+  ALBListenerHTTP:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: "443"
+            StatusCode: HTTP_301
+
+  # ---- CloudWatch Log Group ----
+  BackendLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /interviewai/backend
+      RetentionInDays: 30
+
+Outputs:
+  ALBDnsName:
+    Value: !GetAtt ALB.DNSName
+    Description: Point your Route53 record to this
+
+  EC2InstanceId:
+    Value: !Ref BackendEC2Instance

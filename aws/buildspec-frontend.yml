@@ -1,0 +1,92 @@
+# =============================================================
+# AWS CodeBuild — Frontend Build Spec
+# Builds React app and deploys to S3 + CloudFront invalidation
+# Domain: workforme.space
+# =============================================================
+
+version: 0.2
+
+env:
+  variables:
+    NODE_VERSION: "20"
+    BUILD_DIR: "frontend/dist"
+  parameter-store:
+    S3_BUCKET: "/interviewai/prod/s3_bucket_name"
+    CLOUDFRONT_DISTRIBUTION_ID: "/interviewai/prod/cloudfront_distribution_id"
+    VITE_API_URL: "/interviewai/prod/api_url"
+    VITE_GOOGLE_CLIENT_ID: "/interviewai/prod/google_client_id"
+    VITE_SOCKET_URL: "/interviewai/prod/socket_url"
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 20
+    commands:
+      - echo "=== Installing dependencies ==="
+      - cd frontend
+      - npm ci --prefer-offline
+
+  pre_build:
+    commands:
+      - echo "=== Pre-build checks ==="
+      - node --version
+      - npm --version
+      - echo "Build started on $(date)"
+      # Create .env.production with injected variables
+      - |
+        cat > .env.production << EOF
+        VITE_API_URL=${VITE_API_URL}
+        VITE_GOOGLE_CLIENT_ID=${VITE_GOOGLE_CLIENT_ID}
+        VITE_SOCKET_URL=${VITE_SOCKET_URL}
+        VITE_APP_NAME=InterviewAI
+        VITE_DOMAIN=workforme.space
+        VITE_ENV=production
+        EOF
+      - echo "Environment file created"
+
+  build:
+    commands:
+      - echo "=== Building React application ==="
+      - npm run build
+      - echo "Build completed. Listing dist:"
+      - ls -la dist/
+      - echo "Build size:"
+      - du -sh dist/
+
+  post_build:
+    commands:
+      - echo "=== Deploying to S3 ==="
+      - cd ..
+      # Sync with proper cache headers
+      # Long cache for hashed assets
+      - |
+        aws s3 sync frontend/dist/ s3://${S3_BUCKET}/ \
+          --delete \
+          --cache-control "public, max-age=31536000, immutable" \
+          --exclude "*.html" \
+          --exclude "*.json"
+      # Short cache for HTML and manifest
+      - |
+        aws s3 sync frontend/dist/ s3://${S3_BUCKET}/ \
+          --delete \
+          --cache-control "public, max-age=0, must-revalidate" \
+          --exclude "*" \
+          --include "*.html" \
+          --include "*.json"
+      - echo "=== Invalidating CloudFront cache ==="
+      - |
+        aws cloudfront create-invalidation \
+          --distribution-id ${CLOUDFRONT_DISTRIBUTION_ID} \
+          --paths "/*"
+      - echo "=== Deployment complete! ==="
+      - echo "Site available at: https://workforme.space"
+
+artifacts:
+  files:
+    - "**/*"
+  base-directory: frontend/dist
+  discard-paths: no
+
+cache:
+  paths:
+    - "frontend/node_modules/**/*"

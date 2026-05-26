@@ -1,0 +1,91 @@
+# =============================================================
+# .gitignore — AI Mock Interview Platform
+# =============================================================
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnp
+.pnp.js
+
+# Environment files — NEVER commit these
+.env
+.env.local
+.env.development
+.env.staging
+.env.production
+.env.*.local
+backend/.env
+frontend/.env
+!backend/.env.example
+!frontend/.env.example
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+lerna-debug.log*
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+
+# Testing
+coverage/
+.nyc_output/
+junit.xml
+test-results/
+
+# Docker
+docker-compose.override.yml
+
+# AWS
+*.pem          # EC2 key pairs — NEVER commit
+.aws/
+aws-exports.js
+amplify/
+
+# Temporary files
+tmp/
+temp/
+uploads/       # Local upload directory (use S3 in prod)
+*.tmp
+
+# TypeScript
+*.tsbuildinfo
+
+# Vite
+.vite/
+
+# Security — CRITICAL: never commit these
+*.key
+*.crt
+*.p12
+*.pfx
+secrets/
+credentials/

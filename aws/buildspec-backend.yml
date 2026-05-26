@@ -1,0 +1,82 @@
+# =============================================================
+# AWS CodeBuild — Backend Build Spec
+# Builds Docker image, pushes to ECR, deploys to EC2
+# Domain: workforme.space
+# =============================================================
+
+version: 0.2
+
+env:
+  variables:
+    AWS_DEFAULT_REGION: "us-east-1"
+    APP_NAME: "interview-api"
+  parameter-store:
+    ECR_REPOSITORY_URI: "/interviewai/prod/ecr_repository_uri"
+    EC2_INSTANCE_ID: "/interviewai/prod/ec2_instance_id"
+
+phases:
+  install:
+    commands:
+      - echo "=== Installing tools ==="
+      - apt-get update -y
+      - apt-get install -y jq
+      - echo "Docker version:"
+      - docker --version
+      - echo "AWS CLI version:"
+      - aws --version
+
+  pre_build:
+    commands:
+      - echo "=== Logging into Amazon ECR ==="
+      - IMAGE_TAG=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c1-8)
+      - |
+        aws ecr get-login-password --region $AWS_DEFAULT_REGION | \
+        docker login --username AWS --password-stdin $ECR_REPOSITORY_URI
+      - echo "ECR login successful. Image tag: $IMAGE_TAG"
+
+  build:
+    commands:
+      - echo "=== Building Docker image ==="
+      - cd backend
+      - |
+        docker build \
+          --target runner \
+          --build-arg BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ') \
+          --build-arg VCS_REF=$IMAGE_TAG \
+          -t $APP_NAME:$IMAGE_TAG \
+          -t $APP_NAME:latest \
+          .
+      - echo "Docker image built successfully"
+      - docker images | grep $APP_NAME
+
+  post_build:
+    commands:
+      - echo "=== Pushing image to ECR ==="
+      - docker tag $APP_NAME:$IMAGE_TAG $ECR_REPOSITORY_URI:$IMAGE_TAG
+      - docker tag $APP_NAME:$IMAGE_TAG $ECR_REPOSITORY_URI:latest
+      - docker push $ECR_REPOSITORY_URI:$IMAGE_TAG
+      - docker push $ECR_REPOSITORY_URI:latest
+      - echo "Image pushed to ECR"
+      # Write image definitions for CodeDeploy
+      - |
+        printf '[{"name":"%s","imageUri":"%s"}]' \
+          $APP_NAME $ECR_REPOSITORY_URI:$IMAGE_TAG > ../imagedefinitions.json
+      - echo "=== Triggering CodeDeploy ==="
+      - |
+        aws deploy create-deployment \
+          --application-name interviewai-backend \
+          --deployment-group-name interviewai-prod \
+          --deployment-config-name CodeDeployDefault.OneAtATime \
+          --description "Build $IMAGE_TAG" \
+          --revision revisionType=S3,s3Location="{bucket=$DEPLOYMENT_BUCKET,key=backend/latest.zip,bundleType=zip}"
+      - echo "=== Backend deployment complete! ==="
+
+artifacts:
+  files:
+    - imagedefinitions.json
+    - aws/appspec.yml
+    - aws/scripts/**/*
+
+cache:
+  paths:
+    - "/root/.docker/cache/**/*"

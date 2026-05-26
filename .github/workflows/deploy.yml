@@ -1,0 +1,187 @@
+name: CD — Deploy to AWS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      deploy_target:
+        description: 'What to deploy'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - frontend
+          - backend
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  # ========================================
+  # Deploy Frontend to S3 + CloudFront
+  # ========================================
+  deploy-frontend:
+    name: Deploy Frontend → S3 + CloudFront
+    runs-on: ubuntu-latest
+    if: github.event.inputs.deploy_target != 'backend'
+    environment: production
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build React app
+        env:
+          VITE_API_URL: https://api.workforme.space
+          VITE_GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          VITE_SOCKET_URL: wss://api.workforme.space
+          VITE_GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          VITE_APP_NAME: InterviewAI
+          VITE_DOMAIN: workforme.space
+          VITE_ENV: production
+        run: npm run build
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Sync to S3 (assets — long cache)
+        run: |
+          aws s3 sync dist/ s3://${{ secrets.S3_BUCKET }}/ \
+            --delete \
+            --cache-control "public, max-age=31536000, immutable" \
+            --exclude "*.html" \
+            --exclude "*.json" \
+            --exclude "*.txt"
+
+      - name: Sync to S3 (HTML/manifest — no cache)
+        run: |
+          aws s3 sync dist/ s3://${{ secrets.S3_BUCKET }}/ \
+            --cache-control "public, max-age=0, must-revalidate" \
+            --exclude "*" \
+            --include "*.html" \
+            --include "*.json" \
+            --include "*.txt"
+
+      - name: Invalidate CloudFront
+        run: |
+          INVALIDATION_ID=$(aws cloudfront create-invalidation \
+            --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --paths "/*" \
+            --query 'Invalidation.Id' \
+            --output text)
+          echo "CloudFront invalidation ID: $INVALIDATION_ID"
+
+      - name: Deployment summary
+        run: |
+          echo "✅ Frontend deployed to https://workforme.space"
+          echo "Commit: ${{ github.sha }}"
+
+  # ========================================
+  # Deploy Backend to ECR + EC2
+  # ========================================
+  deploy-backend:
+    name: Deploy Backend → ECR + EC2
+    runs-on: ubuntu-latest
+    if: github.event.inputs.deploy_target != 'frontend'
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image tag
+        run: echo "IMAGE_TAG=$(echo $GITHUB_SHA | cut -c1-8)" >> $GITHUB_ENV
+
+      - name: Build, tag, push Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: interviewai-backend
+        run: |
+          docker build \
+            --target runner \
+            --build-arg BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ') \
+            --build-arg VCS_REF=${{ env.IMAGE_TAG }} \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:${{ env.IMAGE_TAG }} \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+            ./backend
+
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:${{ env.IMAGE_TAG }}
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          
+          echo "ECR_REGISTRY=$ECR_REGISTRY" >> $GITHUB_ENV
+          echo "ECR_REPOSITORY=$ECR_REPOSITORY" >> $GITHUB_ENV
+
+      - name: Create CodeDeploy deployment
+        run: |
+          # Package deployment files to S3
+          zip -r deployment.zip aws/ -x "aws/cloudformation/*"
+          aws s3 cp deployment.zip s3://${{ secrets.CODEDEPLOY_S3_BUCKET }}/backend/latest.zip
+          
+          # Create deployment
+          DEPLOYMENT_ID=$(aws deploy create-deployment \
+            --application-name interviewai-backend \
+            --deployment-group-name interviewai-prod \
+            --s3-location bucket=${{ secrets.CODEDEPLOY_S3_BUCKET }},key=backend/latest.zip,bundleType=zip \
+            --deployment-config-name CodeDeployDefault.OneAtATime \
+            --description "Deploy commit ${{ env.IMAGE_TAG }}" \
+            --query 'deploymentId' \
+            --output text)
+          echo "Deployment ID: $DEPLOYMENT_ID"
+
+      - name: Deployment summary
+        run: |
+          echo "✅ Backend deployed to https://api.workforme.space"
+          echo "Image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+  # ========================================
+  # Post-deployment smoke test
+  # ========================================
+  smoke-test:
+    name: Smoke Test Production
+    runs-on: ubuntu-latest
+    needs: [deploy-frontend, deploy-backend]
+    if: always() && (needs.deploy-frontend.result == 'success' || needs.deploy-backend.result == 'success')
+
+    steps:
+      - name: Test frontend
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://workforme.space)
+          echo "Frontend status: $STATUS"
+          [ "$STATUS" = "200" ] && echo "✅ Frontend OK" || echo "❌ Frontend FAILED"
+
+      - name: Test backend health
+        run: |
+          RESPONSE=$(curl -s https://api.workforme.space/api/health)
+          echo "Backend response: $RESPONSE"
+          echo "$RESPONSE" | grep -q '"status":"ok"' && echo "✅ Backend OK" || echo "❌ Backend FAILED"
