@@ -1,0 +1,72 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: interviewai-cluster
+  region: ap-south-1
+  version: "1.29"
+  tags:
+    Project: ai-interview-platform
+    Environment: production
+
+# Use existing VPC or let eksctl create one
+# vpc:
+#   id: "vpc-xxxx"
+#   subnets:
+#     private:
+#       ap-south-1a: { id: subnet-xxxx }
+#       ap-south-1b: { id: subnet-xxxx }
+
+managedNodeGroups:
+  # Backend workloads node group
+  - name: backend-nodes
+    instanceType: t3.medium
+    minSize: 1
+    maxSize: 4
+    desiredCapacity: 2
+    volumeSize: 30
+    volumeType: gp3
+    privateNetworking: true       # nodes in private subnets
+    labels:
+      role: backend
+    tags:
+      NodeGroup: backend
+    iam:
+      withAddonPolicies:
+        ebs: true
+        cloudWatch: true
+
+  # Frontend + monitoring node group
+  - name: frontend-nodes
+    instanceType: t3.small
+    minSize: 1
+    maxSize: 3
+    desiredCapacity: 2
+    volumeSize: 20
+    volumeType: gp3
+    privateNetworking: true
+    labels:
+      role: frontend
+    tags:
+      NodeGroup: frontend
+
+# Enable CloudWatch logging
+cloudWatch:
+  clusterLogging:
+    enableTypes:
+      - "api"
+      - "audit"
+      - "authenticator"
+      - "controllerManager"
+      - "scheduler"
+
+# Add-ons
+addons:
+  - name: vpc-cni
+    version: latest
+  - name: coredns
+    version: latest
+  - name: kube-proxy
+    version: latest
+  - name: aws-ebs-csi-driver
+    version: latest
