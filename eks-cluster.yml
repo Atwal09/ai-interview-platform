@@ -4,7 +4,7 @@ kind: ClusterConfig
 metadata:
   name: interviewai-cluster
   region: ap-south-1
-  version: "1.29"
+  version: "1.30"
   tags:
     Project: ai-interview-platform
     Environment: production
@@ -20,7 +20,7 @@ metadata:
 managedNodeGroups:
   # Backend workloads node group
   - name: backend-nodes
-    instanceType: t3.medium
+    instanceType: t3.small
     minSize: 1
     maxSize: 4
     desiredCapacity: 2

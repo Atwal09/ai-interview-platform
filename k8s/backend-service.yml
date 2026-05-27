@@ -5,12 +5,15 @@ metadata:
   namespace: interviewai
   labels:
     app: backend
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
 spec:
-  type: ClusterIP       # Internal only — frontend talks to it inside cluster
+  type: LoadBalancer    # Exposes backend publicly via AWS NLB
   selector:
     app: backend
   ports:
     - name: http
-      port: 5000
+      port: 80
       targetPort: 5000
       protocol: TCP
